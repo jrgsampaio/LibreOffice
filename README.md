@@ -1,2 +1,2 @@
 # LibreOfficeOilAndGas
-Codes for LibreOffice Macris GPL3
+Codes for LibreOffice Macros GPL3
