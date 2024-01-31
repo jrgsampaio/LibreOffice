@@ -1,0 +1,365 @@
+REM  *****  BASIC  ***** JUST TEST
+
+
+'--------1---------2---------3---------4---------5---------6---------7---------8
+'2345678901234567890123456789012345678901234567890123456789012345678901234567890
+
+' This Macro was Created by Jorge Sampaio (jrgsampaio@gmail.com) using OO-2.2.0
+' Running in Linux 7.04 (Ubuntu) in 2007-July-08
+' Its functionality results from the efforts and contributions of several
+' OOO-Forum's members (http://www.oooforum.org)
+'
+' LIBREOFFICE EXTENSION
+' Created using LO-7.6.4.1 running in Ubuntu 23.20
+' Version 1 submitted and accepted by LibreOffice on 2024-Jan-13 "as is"
+' Version 1.1 submitted on 2024-Jan-15
+'  Fixed crash when a non-existing sheet is entered.
+'   If non-existing, a new sheet with the new name is created and becomes
+'   the active sheet.
+'   Does not allow a new sheet if the # of sheets is 256 (max allowed by Calc).
+'   In this case the Counter can not start until the user either selects an
+'   existing sheet or deletes an existing sheet.
+' Version 2.0 submitted on 2024-01-20
+'  -This version does not allow to enter a non-existing sheet name. If a non-
+'    existing sheet name is entered, the previous name is recovered after an
+'    error mesage. The user needs to create a new sheet with the nedded name.
+'  -This version provides validation of the cell name. Allowed values are
+'    absolute names with Calc A1 format. Excel R1C1 format is not alowwed,
+'    although the component works if the spreadsheet is using this option. If an
+'    incorrect cell name is entered, the previous name will be recovered after
+'    an error mesage.
+'  -The minimum interval is 1 ms (milisecond) and the maximum is 43,200,000 ms.
+'    The maximum corresponds to 12 hr.
+'  -If the target cell is draggeg while the counter is running, the counter will
+'   update the new cell location but the new name will refresh only after
+'   pressing a button (Lap, Start, or Resume).
+'
+'  Two very similar dialogues,with different button functions are included.
+'    - dlgCounter1 has the following button labels: (default)
+'           Start/Stop
+'           Reset/Lap/Resume
+'    - dlgCounter2 has the following button labels:
+'           Start/Lap/Resume
+'           Reset/Stop
+'    These two configurations are the most common in Stopwatches with 2 buttons.
+'    The selection is done by setting the constant CounterDialog to either
+'      1 or 2 (not runtime configurable)
+'
+' Version 2.1 submitted on 2024-01-21
+'    - Fixed error when changing cell name
+'
+' Version 2.1.1 submitted on 2024-01-24
+'    - A tweak with the buttons' behaviors to be more logical:
+'        1- When counting re-starts, the updating status ("Lap" or "Resume")
+'             is now the same as it was before stopping.
+'           Previously, it would always be updating (label "Lap")
+'        2- When lapping, pressing exit will not update the selected cell.
+'           Previously, pressing exit would update the selected cell to the
+'             current count.
+'             (It seems more logical for me that in a dynamical simulation,
+'             if the counter is put on lapping (Label "Resume") and the user
+'             exits, the current lapping count is the one of interest. It can be
+'             changed back by removing the comment in the subroutine ExitApp().)
+'        3- Fixed the event in dlgCounter2 that calls the useless Calibrate_Interval
+
+' Known issues:
+'  The Counter does not exit when X in the title bar is pressed. (should it?)
+'  Only one reliable instance of the control running in a PC. No plans (or
+'  need) to create a class from which various instances can be added.
+'
+Option Explicit
+
+Private bTimerCounting as Boolean
+Private bTimerUpdCell as Boolean
+Private TheEnd as boolean ' This boolean controls the continuous loop.
+            
+Private oDoc as Object
+Private oSheets as Object
+Private oSheet as Object
+Private oCell as Object
+
+Private oDialog as Object
+Private oDlgDisplay as Object
+Private oDlgStartStop as Object      'dlgCounter1
+Private oDlgResetLapResume as Object 'dlCounter1
+Private oDlgStartLapResume as Object 'dlgCounter2
+Private oDlgResetStop as Object      'dlgCounter2
+Private oDlgInterval as Object
+Private oDlgSheet as Object
+Private oDlgCell as Object
+
+private tmr_count as Long
+Private tmr_interval as long
+Private tmr_sheet as string
+Private tmr_cell as string
+Private Iddle_interval as long
+
+Const cIddle = 5 ' 5 ms. This is ok!
+Const sCalc$ = "com.sun.star.sheet.SpreadsheetDocument"
+REM********************************************************** 
+Const CounterDialog = 1 '1 = dlgCounter1   2 = dlgCounter2  
+REM**********************************************************
+ 
+
+Sub MyCounter()
+
+  oDoc = ThisComponent
+  if not oDoc.SupportsService(sCalc) Then ' Test if this is a Calc document
+    MsgBox  "Extension ""My Counter"" is for " & CHR$(13) & _ 
+            "Spreadsheet (Calc) only. Sorry.", _
+            MB_OK+MB_ICONSTOP, "Not the proper LO component"
+    exit sub
+  end if
+
+  oSheets = oDoc.Sheets
+
+  oSheet = oDoc.GetCurrentController.ActiveSheet ' This is the active sheet
+  tmr_sheet =oSheet.Name                         ' Here I pick the sheet name
+
+  oCell = oDoc.getCurrentSelection ' Get the selected cell of the active sheet.
+
+'-------------------------------------------------------------------------------
+' The following code is from Andrew Pitonyak's "Macros Explained 15.2" and     '
+' "Useful Macro Information 6.6"                                               '
+'  dim oConv                                                                   '
+'  oConv = oDoc.createInstance("com.sun.star.table.CellAddressConversion")     '
+'  oConv.Address = oCell.getCellAddress                                        '
+'  tmr_cell = oConv.UserInterfaceRepresentation                                '
+'------------------------------------------------------------------------------'
+
+'-------------------------------------------------------------------------------
+' This is my solution without a conversion service. (See function GetCellName)
+  tmr_cell = GetCellName()
+'-------------------------------------------------------------------------------  
+
+  DialogLibraries.LoadLibrary("MyCounterLibrary") ' Load the Dialog Library
+
+  Select case CounterDialog 'This Select Case structure sets the dialog to use
+  Case 1
+    oDialog = CreateUnoDialog(DialogLibraries.MyCounterLibrary.dlgCounter1)
+    oDlgStartStop = oDialog.GetControl("btnStartStop")
+    oDlgStartStop.Label = "Start"
+    oDlgResetLapResume = oDialog.GetControl("btnResetLapResume")
+    oDlgResetLapResume.Label = "Reset"
+  Case 2
+    oDialog = CreateUnoDialog(DialogLibraries.MyCounterLibrary.dlgCounter2)
+    oDlgStartLapResume = oDialog.GetControl("btnStartLap")
+    oDlgStartLapResume.Label = "Start"
+    oDlgResetStop = oDialog.GetControl("btnStopReset")
+    oDlgResetStop.Label = "Reset"
+  End Select
+'
+' Next I populate the Dialog with initial data
+'
+  oDlgDisplay = oDialog.GetControl("txtDisplay")
+  tmr_count = 0
+  oDlgDisplay.text = tmr_count
+
+  oDlgInterval = oDialog.GetControl("numInterval")
+  tmr_interval = 1000 ' 1000ms = 1s
+  oDlgInterval.text = tmr_interval
+
+  oDlgSheet = oDialog.GetControl("txtSheet")
+  oDlgSheet.text = tmr_sheet
+
+  oDlgCell = oDialog.GetControl("txtCell")
+  oDlgCell.text = tmr_cell
+
+  oDialog.GetControl("btnExit").Label = "Exit"
+
+  bTimerCounting = False ' This flag controls the Start/Stop
+  bTimerUpdCell = True   ' This flag controls the Lap/Resume
+
+  Iddle_interval = cIddle ' While not counting, the iddle interval prevents the
+                          ' CPU from speeding up doing nothing. It turns to 0
+                          ' when counting and back to iddle when not.          
+  TheEnd = False
+
+  oDialog.setVisible(True) 
+
+  do until TheEnd ' This is an continuous loop, which stops after pressing Exit
+    if bTimerCounting Then        ' bTimerCounting handled by StartStop() and ResetStop()
+      if bTimerUpdCell then       ' bTimerUpdCell handled by ResetLapResume() and StartLapResume()
+        oCell.SetValue(tmr_count) ' Update the cell value
+      end if
+      oDlgDisplay.text = tmr_count   ' Update the display value
+      wait tmr_interval              ' This is the interval delay
+      tmr_count = tmr_count + 1      ' Update the count value
+    end if
+    wait Iddle_interval   ' Either cIddle (not counting) or 0 (counting)
+  loop
+
+End Sub
+
+'
+'  EVENT-DRIVEN METHODS
+'
+' These codes for dlgCounter1
+'
+private Sub StartStop()               ' StartStop button (SS) pressed
+  if bTimerCounting then                ' Test if counting or not
+    bTimerCounting = False                ' If counting, stop counting,
+    oDlgStartStop.Label = "Start"         ' change SS label to Start,
+    EnableFields()                        ' allow changing parameters, 
+    Iddle_interval = cIddle               ' and change iddle interval to cIddle,
+    oDlgResetLapResume.Label = "Reset"    ' Then change RLR label to Reset
+  else                                  '
+    bTimerCounting = True                 ' If not counting, start counting,
+    oDlgStartStop.Label = "Stop"          ' change SS label to Stop,
+    DisableFields()                       ' disable running parameters,
+    Iddle_interval = 0                    ' and change iddle interval to 0
+	if bTimerUpdCell then                 ' Then test if updating the cell or not
+		oDlgResetLapResume.Label = "Lap"    ' If updating, change RLR label to Lap
+	else                                  '
+		oDlgResetLapResume.Label = "Resume"	' If not updating, change RLR label to Resume
+	end if                                '
+  end if                                '
+  tmr_cell = GetCellName()     ' These two lines are for the case the user drags
+  oDlgCell.text = tmr_cell     ' the cell to another position while running.
+End Sub
+
+private Sub ResetLapResume()          ' ResetLapResume button (RLR) pressed
+  if bTimerCounting then                ' Test if counting or not
+    if bTimerUpdCell then                 ' If counting, test if updating
+      bTimerUpdCell = False                 ' If updating, stop updating,
+      oDlgResetLapResume.Label = "Resume"   ' change RLR label to Resume
+    else                                  ' If not updating,
+      bTimerUpdCell = True                  ' start updating,
+      oDlgResetLapResume.Label = "Lap"      ' change RLR label to Lap
+    endif
+  else                                    ' If not counting, the only option is
+  	ResetCounter()                        ' reset the counter
+  end if
+  tmr_cell = GetCellName()     ' These two lines are for the case the user drags
+  oDlgCell.text = tmr_cell     ' the cell to another position while running.
+End Sub
+
+'
+' These codes for dlgCounter2
+'
+private Sub StartLapResume()              ' StartLapResume button (SLR) pressed
+  DisableFields()
+  if bTimerCounting then                  ' Test if counting
+    if bTimerUpdCell then                   ' If counting, test if updating
+      bTimerUpdCell = False                   ' If updating, stop updating
+      oDlgStartLapResume.Label = "Resume"     ' Change SLR label to Resume
+    else
+      bTimerUpdCell = True                    ' If not updating, start updating
+      oDlgStartLapResume.Label = "Lap"        ' Change SLR label to Lap
+    endif
+  else                                    ' This branch if not counting
+    bTimerCounting = True                   ' Starts counting
+    oDlgResetStop.Label = "Stop"            ' Change ResetStop button (RS) label to Stop
+    if bTimerUpdCell then                   'Test if updating
+      oDlgStartLapResume.Label = "Lap"        ' if updating, change RS label to Lap
+    else
+      oDlgStartLapResume.Label = "Resume"     ' if not, change RS label to Resume
+    end if
+    Iddle_interval = 0
+  end if
+  tmr_cell = GetCellName()     ' These two lines are for the case the user drags
+  oDlgCell.text = tmr_cell     ' the cell to another position while running.
+End Sub
+
+private Sub ResetStop()             ' ResetStop button (RS) pressed
+  EnableFields()
+  if bTimerCounting then             ' Test if counting
+    bTimerCounting = False             ' If counting, stops counting,
+    oDlgStartLapResume.Label = "Start" ' change SLR label to Start
+    oDlgResetStop.Label = "Reset"      ' change label to Reset
+    Iddle_interval = cIddle            'chande iddle interval to cIddle
+  else                               ' This branch if not counting - reset
+    ResetCounter()
+  endif
+  tmr_cell = GetCellName()     ' These two lines are for the case the user drags
+  oDlgCell.text = tmr_cell     ' the cell to another position while running.
+End Sub
+
+private Sub ExitApp()                 ' Called when btnExit button is released
+'  oCell.SetValue(tmr_count)          ' This updates the cell count at exit
+  TheEnd = True
+End Sub
+
+private sub Calibrate_Interval() 'Called by the interval event "losing focus"
+' Here we can try to callibrate the counter by reducing the interval to
+' compensate for the processing time spent in running commands. (Basically
+' testing flags and updating the cell and display.) It is very machine dependent
+' and the processes running in parallel. Kind of useless.
+  tmr_interval = int(oDlgInterval.text) - 0 'Change 0 to some small integer
+end sub
+
+private sub Validate_Cell()
+' This subroutine validades the cell name.
+' Put it in the event "When losing focus"
+' If the user puts an invalid cell name, a MessageBox informs the error; and the
+' name of the cell returns to the previous one
+
+  dim new_cell as string
+
+  new_cell = ucase(oDlgCell.text)                ' pick the new name
+  on error goto E1                               ' set error capture structure
+    oCell = oSheet.GetCellRangeByName(new_cell)  ' try to set the cell name
+  on error goto 0
+  tmr_cell = new_cell
+  exit sub                                       ' new name accepted - leave
+
+E1: ' Error handler in case user enters an incorrect cell name
+  MsgBox "The cell name """ & new_cell & """ is not valid." &CHR$(13) & _
+         "You must use absolute name for cells, like A1." & CHR$(13) & _
+         "The previous cell name """ & tmr_cell & """ will be used.", _
+         MB_OK+MB_ICONINFORMATION, "Invalid Cell"
+  oDlgCell.text = tmr_cell                    ' put the old name back
+end sub
+
+private sub Validate_Sheet()
+  dim new_sheet as string
+
+  new_sheet = oDlgSheet.text                    ' pick the new name
+  on error goto E2                              ' set error capture structure
+    oSheet = oSheets.GetByName(new_sheet)       ' try to set the Sheet object
+  on error goto 0
+  oDoc.CurrentController.setActiveSheet(oSheet) 'and activate it
+  oCell = oSheet.GetCellRangeByName(tmr_cell)   'and set the cell to the new sheet
+  tmr_sheet = new_sheet
+  exit sub                                      ' new name accepted - leave
+
+E2: 'error handler in case sheet does not exist
+  MsgBox "The sheet name """ & new_sheet & """ does not exist." &CHR$(13) & _
+         "You must select an existing sheet." & CHR$(13) & _
+         "The previous sheet name """ & tmr_sheet & """ will be used.", _
+         MB_OK+MB_ICONINFORMATION, "Invalid Sheet Name"
+  oDlgSheet.text = tmr_sheet
+end Sub
+
+'
+'  Auxiliary subroutines
+'
+'--------1---------2---------3---------4---------5---------6---------7---------8
+'2345678901234567890123456789012345678901234567890123456789012345678901234567890
+'
+private sub ResetCounter()
+  tmr_count = 0
+  oCell.SetValue(tmr_count)
+  oDlgDisplay.text = tmr_count
+  bTimerUpdCell = True
+end sub
+
+private sub EnableFields()
+  oDlgInterval.Enable = True       ' Can change
+  oDlgCell.Enable = True           '            these values
+  oDlgSheet.Enable = True          '                         while not counting
+end sub
+Private sub DisableFields()
+  oDlgInterval.Enable = False      ' Can't change
+  oDlgCell.Enable = False          '              these values
+  oDlgSheet.Enable = False         '                           while counting
+end sub
+
+private function GetCellName() as string
+  dim AbsName() as string
+  AbsName = Split(oCell.AbsoluteName, "$") ' Because "$" is the first chracter,
+                                           ' Split picks the first element as ""
+  'Here I pick the column letter and row number and contatenate them.
+  'The second "split" is to extract one cell from a range.
+  GetCellName =  AbsName(2)& Split(AbsName(3), ":")(0)
+end function
